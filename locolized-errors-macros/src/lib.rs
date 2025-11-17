@@ -9,9 +9,15 @@ pub fn derive_localized_api_error(input: TokenStream) -> TokenStream {
     let name = &input.ident;
     let enum_name = name.to_string();
 
-    // Automatically derive error_kind from enum name
-    // BadRequestError -> "bad_request", UnauthorizedError -> "unauthorized", etc.
-    let error_kind = derive_error_kind(&enum_name);
+    // Automatically derive error_kind from enum name and convert to ErrorKind
+    let error_kind_str = derive_error_kind(&enum_name);
+    let error_kind = match error_kind_str.as_str() {
+        "bad-request" => quote! { locolized_errors::ErrorKind::BadRequest },
+        "unauthorized" => quote! { locolized_errors::ErrorKind::Unauthorized },
+        "not-found" => quote! { locolized_errors::ErrorKind::NotFound },
+        "internal-server-error" => quote! { locolized_errors::ErrorKind::InternalServerError },
+        _ => panic!("Unknown error kind: {}", error_kind_str),
+    };
 
     let (display_arms, error_kind_arms) = match &input.data {
         Data::Enum(data_enum) => {
@@ -21,14 +27,14 @@ pub fn derive_localized_api_error(input: TokenStream) -> TokenStream {
             for variant in &data_enum.variants {
                 let variant_ident = &variant.ident;
                 let variant_str = variant_ident.to_string();
-                let error_key = format!("errors.{}.{}", error_kind, ccase!(kebab, &variant_str));
+                let error_key =
+                    format!("errors.{}.{}", error_kind_str, ccase!(kebab, &variant_str));
 
                 match &variant.fields {
                     Fields::Unit => {
                         display_arms.push(quote! {
                             #name::#variant_ident => {
-                                use rust_i18n::t;
-                                write!(f, "{}", t!(#error_key))
+                                write!(f, "{}", ::rust_i18n::t!(#error_key))
                             }
                         });
                         error_kind_arms.push(quote! {
@@ -54,8 +60,7 @@ pub fn derive_localized_api_error(input: TokenStream) -> TokenStream {
 
                         display_arms.push(quote! {
                             #name::#variant_ident { #(#field_idents),* } => {
-                                use rust_i18n::t;
-                                write!(f, "{}", t!(#error_key, #(#field_assignments),*))
+                                write!(f, "{}", ::rust_i18n::t!(#error_key, #(#field_assignments),*))
                             }
                         });
                         error_kind_arms.push(quote! {
@@ -70,8 +75,7 @@ pub fn derive_localized_api_error(input: TokenStream) -> TokenStream {
 
                         display_arms.push(quote! {
                             #name::#variant_ident ( #(#field_indices),* ) => {
-                                use rust_i18n::t;
-                                write!(f, "{}", t!(#error_key))
+                                write!(f, "{}", ::rust_i18n::t!(#error_key))
                             }
                         });
                         error_kind_arms.push(quote! {
