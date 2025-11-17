@@ -2,6 +2,8 @@
 name = "locolized-errors-macros"
 version = "0.1.0"
 edition = "2024"
+description="Better loco.rs i18n errors macros"
+license="MIT"
 
 [lib]
 proc-macro = true
