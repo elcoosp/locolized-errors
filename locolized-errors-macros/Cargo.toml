@@ -1,15 +1,24 @@
 [package]
 name = "locolized-errors-macros"
-version = "0.1.0"
-edition = "2024"
-description="Better loco.rs i18n errors macros"
-license="MIT"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords = ["loco", "error", "i18n", "derive", "macros"]
+categories = ["rust-patterns", "no-std"]
+description = "Better loco.rs i18n errors macros"
+readme = "../README.md"
 
 [lib]
 proc-macro = true
 
 [dependencies]
-syn = { version = "2.0", features = ["full", "extra-traits"] }
-quote = "1.0"
-proc-macro2 = "1.0"
-convert_case = "0.9.0"
+syn.workspace = true
+quote.workspace = true
+proc-macro2.workspace = true
+
+[lints]
+workspace = true
