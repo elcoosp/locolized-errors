@@ -1,3 +1,60 @@
 [workspace]
-resolver="2"
-members = ["locolized-errors","locolized-errors-macros"]
+resolver = "3"
+members = ["locolized-errors", "locolized-errors-macros"]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT"
+repository = "https://github.com/elcoosp/locolized-errors"
+homepage = "https://github.com/elcoosp/locolized-errors"
+authors = ["elcoosp"]
+keywords = ["loco", "error", "i18n", "localization", "axum"]
+categories = ["rust-patterns", "web-programming", "localization"]
+
+[workspace.dependencies]
+loco-rs = { version = "1.2", default-features = false, features = ["with-db"] }
+axum = { version = "0.8.9", default-features = false }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+syn = { version = "3.0.9", features = ["full", "extra-traits"] }
+quote = "1.0.47"
+proc-macro2 = "1.0.107"
+rust-i18n = "4.2.4"
+
+[workspace.lints.rust]
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+# The project targets a zero-warning build: pedantic + the restriction lints
+# that ban panic paths. CI runs clippy with `-D warnings`, so any new finding
+# must be fixed in code, never silenced with an allow attribute.
+pedantic = { level = "warn", priority = -1 }
+all = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+# loco-rs and trybuild pull several major versions of common crates
+# (toml, rand, syn, ...); a library cannot deduplicate its dependents' trees.
+multiple_crate_versions = "allow"
+
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = 0
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
