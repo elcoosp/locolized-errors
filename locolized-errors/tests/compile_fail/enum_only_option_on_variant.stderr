@@ -1,0 +1,5 @@
+error: this option is only valid on the enum, not on variants; variant options are `key`, `message`, `status`, `description`, `locale`
+ --> tests/compile_fail/enum_only_option_on_variant.rs:6:17
+  |
+6 |     #[localized(kind = "not-found")]
+  |                 ^^^^

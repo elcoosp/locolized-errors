@@ -1,0 +1,5 @@
+error: `localized(kind = ...)` and `localized(status = ...)` are mutually exclusive
+ --> tests/compile_fail/kind_and_status_conflict.rs:4:35
+  |
+4 | #[localized(kind = "bad-request", status = 418)]
+  |                                   ^^^^^^

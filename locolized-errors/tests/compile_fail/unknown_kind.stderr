@@ -1,0 +1,5 @@
+error: cannot determine the error kind of `TeapotError`: the kebab-cased name `teapot` is not a known kind. Rename the enum (e.g. `...BadRequestError`), or annotate it with `#[localized(kind = "...")]` (one of bad-request, unauthorized, not-found, internal-server-error) or `#[localized(status = ...)]`
+ --> tests/compile_fail/unknown_kind.rs:4:10
+  |
+4 | pub enum TeapotError {
+  |          ^^^^^^^^^^^

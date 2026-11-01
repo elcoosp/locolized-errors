@@ -1,0 +1,5 @@
+error: `LocalizedApiError` can only be derived for enums
+ --> tests/compile_fail/derive_on_struct.rs:4:12
+  |
+4 | pub struct NotAnEnum {
+  |            ^^^^^^^^^

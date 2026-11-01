@@ -1,0 +1,5 @@
+error: unknown `localized` option; expected one of `kind`, `status`, `description`, `locale`, `no_into_response`
+ --> tests/compile_fail/unknown_option.rs:4:35
+  |
+4 | #[localized(kind = "bad-request", bogus = 1)]
+  |                                   ^^^^^
