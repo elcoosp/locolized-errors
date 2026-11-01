@@ -1,0 +1,54 @@
+name: Prepare release
+
+# One-click release preparation: computes the next version from conventional
+# commits via git-cliff, bumps both crates, regenerates CHANGELOG.md, and
+# pushes the version bump commit plus the `v*` tag that triggers the release
+# workflow.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    name: Bump version and tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install git-cliff and cargo-edit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: git-cliff,cargo-release
+      - name: Compute next version
+        id: version
+        run: |
+          NEXT=$(git cliff --bump --unreleased --config cliff.toml 2>/dev/null | grep -m1 -oE '[0-9]+\.[0-9]+\.[0-9]+' || true)
+          if [ -z "$NEXT" ]; then
+            echo "No release-relevant commits since the last tag; nothing to do."
+            exit 1
+          fi
+          echo "next=$NEXT" >> "$GITHUB_OUTPUT"
+      - name: Bump workspace version
+        run: |
+          VERSION="${{ steps.version.outputs.next }}"
+          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
+          grep -n "version = \"$VERSION\"" Cargo.toml
+      - name: Regenerate CHANGELOG.md
+        env:
+          GITHUB_REPO: ${{ github.repository }}
+        run: git cliff --config cliff.toml --out CHANGELOG.md --tag "v${{ steps.version.outputs.next }}"
+      - name: Commit and tag
+        run: |
+          VERSION="${{ steps.version.outputs.next }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml CHANGELOG.md
+          git commit -m "chore(release): v$VERSION"
+          git tag "v$VERSION"
+          git push origin HEAD --tags
