@@ -1,0 +1,6 @@
+errors.bad-request.user-not-found: "Utilisateur introuvable"
+errors.bad-request.too-many-attempts: "Trop de tentatives : %{attempts}"
+errors.bad-request.switch-already-triggered: "L'interrupteur %{switch_id} a déjà été déclenché"
+errors.not-found.record-missing: "L'enregistrement demandé est introuvable"
+errors.internal-server-error.vault-sealed: "Le coffre est scellé"
+errors.teapot.brewed: "Je suis une théière"
