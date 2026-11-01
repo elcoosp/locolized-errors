@@ -1,13 +1,30 @@
 [package]
 name = "locolized-errors"
-version = "0.1.0"
-edition = "2024"
-description="Better loco.rs i18n errors"
-license="MIT"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Better loco.rs i18n errors"
+readme = "../README.md"
+
+[package.metadata.docs.rs]
+all-features = true
 
 [dependencies]
-serde = { version = "1.0.228", features = ["derive"] }
-locolized-errors-macros={path="../locolized-errors-macros"}
-loco-rs = { version = "0.16" }
-axum = "0.8"
-serde_json = "1.0.145"
+serde = { workspace = true }
+serde_json.workspace = true
+loco-rs.workspace = true
+axum.workspace = true
+rust-i18n.workspace = true
+locolized-errors-macros = { path = "../locolized-errors-macros", version = "0.2.0" }
+
+[dev-dependencies]
+trybuild = "1.0.122"
+
+[lints]
+workspace = true
