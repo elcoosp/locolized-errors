@@ -19,12 +19,13 @@
 
 ## Features
 
-- **Automatic error kind detection**: derives HTTP error kinds from enum names (`BadRequestError` → `ErrorKind::BadRequest`), overridable per enum or per variant.
+- **Automatic error kind detection**: derives HTTP error kinds from enum names (`BadRequestError` → `ErrorKind::BadRequest`), overridable per enum or per variant. Nine named kinds are built in (400/401/403/404/409/422/429/500/503), plus arbitrary custom statuses.
 - **Internationalization ready**: built-in integration with `rust_i18n` for localized, parameterized error messages — `rust-i18n` is re-exported, so it is **not** a direct dependency of your app.
 - **Seamless Loco integration**: direct `Into<loco_rs::Error>` conversion for clean controller logic.
-- **Structured JSON payloads**: `to_json()` / `to_json_string()` produce `{kind, variant, key, message, params}` for SPA/mobile frontends.
-- **Axum/Loco `IntoResponse`**: error enums can be returned straight from handlers, rendering the JSON payload with the matching HTTP status (opt-out available).
+- **Structured JSON payloads, streamed in a single pass**: `to_json()` / `to_json_string()` / `to_json_bytes()` produce `{kind, variant, key, message, params}` for SPA/mobile frontends — serialized straight from the variant fields, no intermediate tree.
+- **Axum/Loco `IntoResponse`**: error enums can be returned straight from handlers, rendering the JSON payload with the matching HTTP status and `content-type: application/json` (opt-out available).
 - **Flexible variants**: unit, named, and tuple variants supported; named fields interpolate into messages.
+- **Lean by default**: no database stack (`loco-rs` pulled without `with-db`), trimmed `syn` features — 58 fewer crates and ~20 % faster clean builds than 0.2.0 for non-Loco consumers.
 
 ## Installation
 
@@ -142,7 +143,7 @@ The `#[localized(...)]` helper attribute configures the derive.
 
 | Option | Example | Effect |
 | :--- | :--- | :--- |
-| `kind` | `#[localized(kind = "unauthorized")]` | Explicit kind: `bad-request`, `unauthorized`, `not-found`, `internal-server-error` |
+| `kind` | `#[localized(kind = "unauthorized")]` | Explicit kind: `bad-request`, `unauthorized`, `forbidden`, `not-found`, `conflict`, `unprocessable-entity`, `too-many-requests`, `internal-server-error`, `service-unavailable` |
 | `status` | `#[localized(status = 418)]` | Map the whole enum to `ErrorKind::Custom` with that HTTP status |
 | `description` | `#[localized(description = "...")]` | Description carried into Loco's `ErrorDetail` for custom statuses |
 | `locale` | `#[localized(locale = "fr")]` | Pin the translation locale for every variant |
@@ -166,8 +167,13 @@ Without attributes, the kind derives from the enum name (`BadRequestError` → `
 | :--- | :--- | :--- | :--- |
 | `...BadRequestError` / `bad-request` | `ErrorKind::BadRequest` | 400 | `BadRequest` (with `{"code", "message"}` envelope) |
 | `...UnauthorizedError` / `unauthorized` | `ErrorKind::Unauthorized` | 401 | `Unauthorized` |
+| `...ForbiddenError` / `forbidden` | `ErrorKind::Forbidden` | 403 | `CustomError` |
 | `...NotFoundError` / `not-found` | `ErrorKind::NotFound` | 404 | `NotFound` |
+| `...ConflictError` / `conflict` | `ErrorKind::Conflict` | 409 | `CustomError` |
+| `...UnprocessableEntityError` / `unprocessable-entity` | `ErrorKind::UnprocessableEntity` | 422 | `CustomError` |
+| `...TooManyRequestsError` / `too-many-requests` | `ErrorKind::TooManyRequests` | 429 | `CustomError` |
 | `...InternalServerErrorError` / `internal-server-error` | `ErrorKind::InternalServerError` | 500 | `InternalServerError` |
+| `...ServiceUnavailableError` / `service-unavailable` | `ErrorKind::ServiceUnavailable` | 503 | `CustomError` |
 | `#[localized(status = NNN)]` | `ErrorKind::Custom` | NNN | `CustomError` (with `ErrorDetail`) |
 
 ### Field interpolation
@@ -192,10 +198,28 @@ The derive implements `Display`, `std::error::Error`, `IntoResponse`, `From<E> f
 | `error_kind()` | The resolved `ErrorKind` |
 | `error_variant()` | Variant name (e.g. `"TooManyAttempts"`) |
 | `error_key()` | Full translation key (e.g. `"errors.bad-request.too-many-attempts"`) |
-| `error_params()` | Named fields as JSON-ready `(&str, Value)` pairs |
+| `error_message()` | Localized message as `Cow<'static, str>` — borrowed when no interpolation is needed |
+| `error_params()` | Named fields as JSON-ready `(&str, Value)` pairs (introspection) |
 | `status_code()` | HTTP status for the kind |
-| `to_json()` / `to_json_string()` | Structured payload |
+| `to_json()` / `to_json_string()` / `to_json_bytes()` | Structured payload, streamed in a single pass |
 | `to_loco_error()` | Conversion into `loco_rs::Error` |
+
+## Performance
+
+The 0.3.0 iteration made every payload path single-pass (no intermediate
+`serde_json::Value` tree, no per-field materialization), removed the per-call
+allocation on custom-status kinds and the double serialization in
+`IntoResponse`, and cut the dependency graph by 58 crates. Measured numbers
+and methodology: [docs/BENCHMARKS.md](docs/BENCHMARKS.md); the design notes
+and findings: [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+
+## 0.3.0 breaking changes
+
+- `ErrorKind::Custom(StatusCode, String)` is now `Custom(StatusCode, Cow<'static, str>)` — the derive emits borrowed descriptions and never allocates; runtime constructors can still own.
+- The generated `IntoResponse` now sets `content-type: application/json` (0.2.0 unintentionally served the JSON payload as `text/plain`).
+- `ErrorKind` gained the `Forbidden`, `Conflict`, `UnprocessableEntity`, `TooManyRequests` and `ServiceUnavailable` variants (match exhaustively? add the new arms).
+- `LocalizedApiError` gained `error_message()` (defaulted) and the hidden `__serialize_params` hook (defaulted); derive users are unaffected.
+- `loco_rs` is re-exported without the `with-db` feature: code reaching db types through `locolized_errors::loco_rs` must depend on `loco-rs` directly (Loco apps already do).
 
 ## Requirements
 
@@ -209,6 +233,7 @@ The derive implements `Display`, `std::error::Error`, `IntoResponse`, `From<E> f
 cargo test --workspace                # unit + integration + trybuild + doctests
 cargo clippy --workspace --all-targets -- -D warnings
 cargo llvm-cov --workspace --all-targets   # coverage
+cargo bench --bench perf              # criterion: legacy (0.2.0) vs current
 ```
 
 CI (`.github/workflows/`) runs rustfmt, pedantic clippy (zero warnings, no allows), tests, rustdoc, an MSRV job, and coverage. Releases are automated: `prepare-release.yml` computes the next version from conventional commits with [git-cliff](https://git-cliff.org), regenerates `CHANGELOG.md`, and pushes a `v*` tag; `release.yml` builds, generates the changelog, creates the GitHub release and (optionally) publishes to crates.io.
