@@ -4,6 +4,10 @@
 //!
 //! `expand` is a pure function over `&DeriveInput`, which makes it directly
 //! unit-testable without invoking rustc.
+//!
+//! Everything is emitted inside a `const _: () = { … }` block: the impls are
+//! still global, but the two helper structs (`__Payload`, `__Params`) stay
+//! scoped to this expansion, so several derives can coexist in one module.
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -13,13 +17,14 @@ use crate::attrs::{ContainerAttrs, VariantAttrs};
 use crate::case::to_kebab_case;
 use crate::kind::{KindPlan, custom_kind_expr, resolve_kind};
 
-/// The five match arms generated for one variant.
+/// The per-variant data shared by the generated match arms.
 struct VariantArms {
-    display: TokenStream,
+    message: TokenStream,
     kind: TokenStream,
     variant: TokenStream,
     key: TokenStream,
     params: TokenStream,
+    stream_params: TokenStream,
 }
 
 /// Expand the `LocalizedApiError` derive for one input.
@@ -41,22 +46,122 @@ pub(crate) fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
     let container = ContainerAttrs::parse(&input.attrs)?;
     let plan = resolve_kind(enum_ident, &container)?;
 
-    let mut display_arms = Vec::with_capacity(data_enum.variants.len());
+    let mut message_arms = Vec::with_capacity(data_enum.variants.len());
     let mut kind_arms = Vec::with_capacity(data_enum.variants.len());
     let mut name_arms = Vec::with_capacity(data_enum.variants.len());
     let mut key_arms = Vec::with_capacity(data_enum.variants.len());
     let mut param_arms = Vec::with_capacity(data_enum.variants.len());
+    let mut stream_param_arms = Vec::with_capacity(data_enum.variants.len());
 
     for variant in &data_enum.variants {
         let arms = variant_arms(variant, &plan, &container)?;
-        display_arms.push(arms.display);
+        message_arms.push(arms.message);
         kind_arms.push(arms.kind);
         name_arms.push(arms.variant);
         key_arms.push(arms.key);
         param_arms.push(arms.params);
+        stream_param_arms.push(arms.stream_params);
     }
 
-    let into_response_impl = (!container.no_into_response).then(|| {
+    let arms = TraitArms {
+        message: message_arms,
+        kind: kind_arms,
+        variant: name_arms,
+        key: key_arms,
+        params: param_arms,
+        stream_params: stream_param_arms,
+    };
+    let into_response_impl = into_response_impl(enum_ident, !container.no_into_response);
+    let trait_impl = trait_impl(enum_ident, &arms);
+    let payload_structs = payload_structs(enum_ident);
+    let display_impl = display_impl(enum_ident);
+    let from_impl = from_impl(enum_ident);
+
+    Ok(quote! {
+        const _: () = {
+            #payload_structs
+            #display_impl
+            #trait_impl
+            #from_impl
+            #into_response_impl
+        };
+    })
+}
+
+/// Single-pass JSON payload views, scoped to this expansion so several
+/// derives can coexist in one module.
+fn payload_structs(enum_ident: &Ident) -> TokenStream {
+    quote! {
+        struct __Params<'a>(&'a #enum_ident);
+
+        impl ::serde::Serialize for __Params<'_> {
+            fn serialize<S: ::serde::Serializer>(
+                &self,
+                serializer: S,
+            ) -> ::core::result::Result<S::Ok, S::Error> {
+                <#enum_ident as ::locolized_errors::LocalizedApiError>::__serialize_params(
+                    self.0,
+                    serializer,
+                )
+            }
+        }
+
+        struct __Payload<'a>(&'a #enum_ident);
+
+        impl ::serde::Serialize for __Payload<'_> {
+            fn serialize<S: ::serde::Serializer>(
+                &self,
+                serializer: S,
+            ) -> ::core::result::Result<S::Ok, S::Error> {
+                use ::locolized_errors::LocalizedApiError as _;
+                use ::serde::ser::SerializeStruct as _;
+                let mut __state = serializer.serialize_struct("LocalizedApiError", 5)?;
+                __state.serialize_field("kind", self.0.error_kind().as_kebab())?;
+                __state.serialize_field("variant", self.0.error_variant())?;
+                __state.serialize_field("key", self.0.error_key())?;
+                __state.serialize_field("message", self.0.error_message().as_ref())?;
+                __state.serialize_field("params", &__Params(self.0))?;
+                __state.end()
+            }
+        }
+    }
+}
+
+/// `Display` delegates to `error_message`: the localized text is produced
+/// once per variant shape and rendered without format machinery. `Error`
+/// comes along for free once `Display + Debug` hold.
+fn display_impl(enum_ident: &Ident) -> TokenStream {
+    quote! {
+        #[automatically_derived]
+        impl ::core::fmt::Display for #enum_ident {
+            fn fmt(&self, __formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                use ::locolized_errors::LocalizedApiError as _;
+                __formatter.write_str(self.error_message().as_ref())
+            }
+        }
+
+        #[automatically_derived]
+        impl ::core::error::Error for #enum_ident {}
+    }
+}
+
+/// `From<E> for loco_rs::Error`: the `?` / `.into()` route into controllers.
+fn from_impl(enum_ident: &Ident) -> TokenStream {
+    quote! {
+        #[automatically_derived]
+        impl ::core::convert::From<#enum_ident> for ::locolized_errors::loco_rs::errors::Error {
+            fn from(error: #enum_ident) -> Self {
+                use ::locolized_errors::LocalizedApiError as _;
+                error.to_loco_error()
+            }
+        }
+    }
+}
+
+/// The generated `IntoResponse`, unless opted out: the structured payload
+/// bytes with the matching status and `content-type: application/json`.
+fn into_response_impl(enum_ident: &Ident, enabled: bool) -> Option<TokenStream> {
+    enabled.then(|| {
         quote! {
             #[automatically_derived]
             impl ::locolized_errors::loco_rs::prelude::IntoResponse for #enum_ident {
@@ -64,46 +169,67 @@ pub(crate) fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
                     self,
                 ) -> ::locolized_errors::loco_rs::prelude::Response {
                     use ::locolized_errors::LocalizedApiError as _;
-                    use ::locolized_errors::loco_rs::prelude::IntoResponse as _;
-                    (self.status_code(), self.to_json_string()).into_response()
+                    ::locolized_errors::__response_from_json(
+                        self.status_code(),
+                        self.to_json_bytes(),
+                    )
                 }
             }
         }
-    });
+    })
+}
 
-    Ok(quote! {
-        #[automatically_derived]
-        impl ::core::fmt::Display for #enum_ident {
-            fn fmt(&self, __formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-                match self {
-                    #(#display_arms)*
-                }
-            }
-        }
+/// The per-variant match arms grouped for the trait impl.
+struct TraitArms {
+    message: Vec<TokenStream>,
+    kind: Vec<TokenStream>,
+    variant: Vec<TokenStream>,
+    key: Vec<TokenStream>,
+    params: Vec<TokenStream>,
+    stream_params: Vec<TokenStream>,
+}
 
-        #[automatically_derived]
-        impl ::core::error::Error for #enum_ident {}
-
+/// The `LocalizedApiError` impl: the four generated primitives, the message,
+/// the streaming params override and the single-pass payload methods.
+fn trait_impl(enum_ident: &Ident, arms: &TraitArms) -> TokenStream {
+    let TraitArms {
+        message,
+        kind,
+        variant,
+        key,
+        params,
+        stream_params,
+    } = arms;
+    let fallback = quote! {
+        ::locolized_errors::__payload_tree(
+            &self.error_kind(),
+            self.error_variant(),
+            self.error_key(),
+            &self.error_message(),
+            self.error_params(),
+        )
+    };
+    quote! {
         #[automatically_derived]
         impl ::locolized_errors::LocalizedApiError for #enum_ident {
             #[inline]
             fn error_kind(&self) -> ::locolized_errors::ErrorKind {
                 match self {
-                    #(#kind_arms)*
+                    #(#kind)*
                 }
             }
 
             #[inline]
             fn error_variant(&self) -> &'static ::core::primitive::str {
                 match self {
-                    #(#name_arms)*
+                    #(#variant)*
                 }
             }
 
             #[inline]
             fn error_key(&self) -> &'static ::core::primitive::str {
                 match self {
-                    #(#key_arms)*
+                    #(#key)*
                 }
             }
 
@@ -112,21 +238,53 @@ pub(crate) fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
                 &self,
             ) -> ::std::vec::Vec<(&'static ::core::primitive::str, ::locolized_errors::serde_json::Value)> {
                 match self {
-                    #(#param_arms)*
+                    #(#params)*
                 }
             }
-        }
 
-        #[automatically_derived]
-        impl ::core::convert::From<#enum_ident> for ::locolized_errors::loco_rs::errors::Error {
-            fn from(error: #enum_ident) -> Self {
+            #[inline]
+            fn error_message(
+                &self,
+            ) -> ::std::borrow::Cow<'static, ::core::primitive::str> {
+                match self {
+                    #(#message)*
+                }
+            }
+
+            #[doc(hidden)]
+            #[inline]
+            fn __serialize_params<S: ::serde::Serializer>(
+                &self,
+                __serializer: S,
+            ) -> ::core::result::Result<S::Ok, S::Error> {
+                use ::serde::ser::SerializeMap as _;
+                match self {
+                    #(#stream_params)*
+                }
+            }
+
+            #[inline]
+            fn to_json(&self) -> ::locolized_errors::serde_json::Value {
                 use ::locolized_errors::LocalizedApiError as _;
-                error.to_loco_error()
+                ::locolized_errors::serde_json::to_value(__Payload(self))
+                    .unwrap_or_else(|_| #fallback)
+            }
+
+            #[inline]
+            fn to_json_string(&self) -> ::std::string::String {
+                use ::locolized_errors::LocalizedApiError as _;
+                ::std::string::String::from_utf8(self.to_json_bytes())
+                    .unwrap_or_default()
+            }
+
+            #[inline]
+            fn to_json_bytes(&self) -> ::std::vec::Vec<::core::primitive::u8> {
+                use ::locolized_errors::LocalizedApiError as _;
+                ::locolized_errors::serde_json::to_vec(&__Payload(self))
+                    .unwrap_or_else(|_| #fallback.to_string().into_bytes())
             }
         }
-
-        #into_response_impl
-    })
+    }
 }
 
 /// Generate the five match arms for one variant.
@@ -171,7 +329,7 @@ fn variant_arms(
         &variant.fields,
         &quote! { #full_key_literal },
     );
-    let display_arm = display_arm(
+    let message_arm = message_arm(
         variant_ident,
         &variant.fields,
         &attrs,
@@ -180,20 +338,22 @@ fn variant_arms(
     );
 
     Ok(VariantArms {
-        display: display_arm,
+        message: message_arm,
         kind: kind_arm,
         variant: variant_arm,
         key: key_arm,
         params: params_arm(variant_ident, &variant.fields),
+        stream_params: stream_params_arm(variant_ident, &variant.fields),
     })
 }
 
-/// Build the `Display` match arm for one variant.
+/// Build the `error_message` match arm for one variant.
 ///
-/// - unit and tuple variants render their (non-interpolated) translation;
+/// - unit and tuple variants render their (non-interpolated) translation,
+///   which `t!` returns as a borrowed `Cow` when found;
 /// - named fields are forwarded to `t!` as named parameters;
-/// - a `message = "..."` override replaces the `t!` lookup entirely.
-fn display_arm(
+/// - a `message = "..."` override is a borrowed static literal.
+fn message_arm(
     variant_ident: &Ident,
     fields: &Fields,
     attrs: &VariantAttrs,
@@ -203,7 +363,7 @@ fn display_arm(
     let body = match attrs.message.as_deref() {
         Some(message) => {
             let literal = LitStr::new(message, variant_ident.span());
-            quote! { #literal }
+            quote! { ::std::borrow::Cow::Borrowed(#literal) }
         }
         None => t_call(
             full_key,
@@ -212,9 +372,7 @@ fn display_arm(
         ),
     };
     match fields {
-        Fields::Unit => {
-            quote! { Self::#variant_ident => ::core::write!(__formatter, "{}", #body), }
-        }
+        Fields::Unit => quote! { Self::#variant_ident => #body, },
         Fields::Named(fields_named) => {
             let idents: Vec<&Ident> = fields_named
                 .named
@@ -222,11 +380,10 @@ fn display_arm(
                 .filter_map(|field| field.ident.as_ref())
                 .collect();
             if attrs.message.is_some() {
-                quote! { Self::#variant_ident { .. } => ::core::write!(__formatter, "{}", #body), }
+                quote! { Self::#variant_ident { .. } => #body, }
             } else {
                 quote! {
-                    Self::#variant_ident { #(#idents),* } =>
-                        ::core::write!(__formatter, "{}", #body),
+                    Self::#variant_ident { #(#idents),* } => #body,
                 }
             }
         }
@@ -234,7 +391,7 @@ fn display_arm(
             let wildcards: Vec<TokenStream> = (0..fields_unnamed.unnamed.len())
                 .map(|_| quote! { _ })
                 .collect();
-            quote! { Self::#variant_ident(#(#wildcards),*) => ::core::write!(__formatter, "{}", #body), }
+            quote! { Self::#variant_ident(#(#wildcards),*) => #body, }
         }
     }
 }
@@ -257,7 +414,9 @@ fn interpolation_args(fields: &Fields) -> Vec<TokenStream> {
 /// arguments. The path goes through the `locolized_errors` re-export so
 /// downstream crates do not need `rust-i18n` as a direct dependency; the
 /// macro still expands inside the *user's* crate, which is where `i18n!`
-/// must have been initialized.
+/// must have been initialized. The expansion unifies to
+/// `Cow<'static, str>`: borrowed for parameterless hits, owned when
+/// interpolated.
 fn t_call(key: &str, locale: Option<&str>, args: &[TokenStream]) -> TokenStream {
     let key_literal = LitStr::new(key, proc_macro2::Span::call_site());
     match locale {
@@ -304,6 +463,38 @@ fn params_arm(variant_ident: &Ident, fields: &Fields) -> TokenStream {
     }
 }
 
+/// Match arm streaming the JSON-ready parameter object: named fields
+/// serialize straight from the variant (`serialize_entry`, no intermediate
+/// `Value`, no `Vec`); unit and tuple variants emit an empty object.
+fn stream_params_arm(variant_ident: &Ident, fields: &Fields) -> TokenStream {
+    match fields {
+        Fields::Named(fields_named) => {
+            let idents: Vec<&Ident> = fields_named
+                .named
+                .iter()
+                .filter_map(|field| field.ident.as_ref())
+                .collect();
+            let names = idents
+                .iter()
+                .map(|ident| LitStr::new(&ident.to_string(), ident.span()));
+            let length = idents.len();
+            quote! {
+                Self::#variant_ident { #(#idents),* } => {
+                    let mut __map = __serializer.serialize_map(Some(#length))?;
+                    #(__map.serialize_entry(#names, #idents)?;)*
+                    __map.end()
+                }
+            }
+        }
+        Fields::Unit => quote! {
+            Self::#variant_ident => __serializer.serialize_map(Some(0))?.end(),
+        },
+        Fields::Unnamed(_) => quote! {
+            Self::#variant_ident (..) => __serializer.serialize_map(Some(0))?.end(),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -344,6 +535,124 @@ mod tests {
     }
 
     #[test]
+    fn display_routes_through_error_message() {
+        let output = expand_src(&quote! {
+            pub enum BadRequestError { UserNotFound }
+        })
+        .unwrap();
+        assert!(
+            output.contains("__formatter . write_str (self . error_message () . as_ref ())",),
+            "{output}"
+        );
+        // The generated Display no longer carries per-variant arms.
+        let display = output
+            .split("impl :: core :: fmt :: Display")
+            .nth(1)
+            .unwrap()
+            .split("impl :: core :: error :: Error")
+            .next()
+            .unwrap();
+        assert!(display.contains("write_str"), "{display}");
+        assert!(
+            !display.contains("match self"),
+            "Display must delegate to error_message: {display}"
+        );
+    }
+
+    #[test]
+    fn message_arms_return_cow() {
+        let output = expand_src(&quote! {
+            #[localized(kind = "bad-request")]
+            pub enum Mixed {
+                #[localized(message = "static text")]
+                Static { x: u8 },
+                Dynamic { attempts: u32 },
+                Unit,
+                Tuple(u8),
+            }
+        })
+        .unwrap();
+        assert!(
+            output.contains(":: std :: borrow :: Cow :: Borrowed (\"static text\")"),
+            "{output}"
+        );
+        assert!(
+            output.contains("fn error_message (& self ,) -> :: std :: borrow :: Cow < 'static , :: core :: primitive :: str >"),
+            "{output}"
+        );
+        assert!(output.contains("attempts = attempts"), "{output}");
+    }
+
+    #[test]
+    fn params_stream_straight_from_fields() {
+        let output = expand_src(&quote! {
+            #[localized(kind = "bad-request")]
+            pub enum BadRequestError { ParseError { field: String, value: String }, Unit, Tuple(String) }
+        })
+        .unwrap();
+        assert!(
+            output.contains("__map . serialize_entry (\"field\" , field) ? ;"),
+            "{output}"
+        );
+        assert!(
+            output.contains("__map . serialize_entry (\"value\" , value) ? ;"),
+            "{output}"
+        );
+        assert!(
+            output.contains("Self :: Unit => __serializer . serialize_map (Some (0)) ? . end ()"),
+            "{output}"
+        );
+        // Named fields stream directly from the variant inside
+        // `__serialize_params`; only the `error_params` introspection arm may
+        // materialize `Value`s.
+        let streaming = output
+            .split("fn __serialize_params")
+            .nth(1)
+            .unwrap()
+            .split("fn to_json")
+            .next()
+            .unwrap();
+        assert!(
+            !streaming.contains("to_value"),
+            "streaming params must not materialize Values: {streaming}"
+        );
+    }
+
+    #[test]
+    fn payload_overrides_use_single_pass_serialization() {
+        let output = expand_src(&quote! {
+            pub enum NotFoundError { NothingHere }
+        })
+        .unwrap();
+        for fragment in [
+            "struct __Payload < 'a > (& 'a NotFoundError)",
+            "serialize_struct (\"LocalizedApiError\" , 5)",
+            "fn to_json_bytes (& self) -> :: std :: vec :: Vec < :: core :: primitive :: u8 >",
+            ":: locolized_errors :: serde_json :: to_vec (& __Payload (self))",
+            "__payload_tree",
+        ] {
+            assert!(
+                output.contains(fragment),
+                "missing {fragment} in:\n{output}"
+            );
+        }
+    }
+
+    #[test]
+    fn into_response_streams_bytes_with_json_content_type() {
+        let output = expand_src(&quote! {
+            pub enum BadRequestError { X }
+        })
+        .unwrap();
+        assert!(
+            output.contains(
+                ":: locolized_errors :: __response_from_json (self . status_code () , self . to_json_bytes () ,)",
+            ),
+            "{output}"
+        );
+    }
+
+    #[test]
     fn tuple_variants_render_without_interpolation() {
         let output = expand_src(&quote! {
             #[derive(Debug, serde::Serialize)]
@@ -353,35 +662,41 @@ mod tests {
         assert!(output.contains("Self :: Invalid (_) =>"), "{output}");
         assert!(output.contains("Self :: Pair (_ , _) =>"), "{output}");
         assert!(output.contains("Self :: Invalid (..) =>"), "{output}");
+        // Tuple variants carry no parameters on either params path.
+        let streaming = output
+            .split("fn __serialize_params")
+            .nth(1)
+            .unwrap()
+            .split("fn to_json")
+            .next()
+            .unwrap();
         assert!(
-            !output.contains("to_value"),
-            "tuple fields must not become params: {output}"
+            !streaming.contains("unwrap_or_default"),
+            "tuple fields must not become params: {streaming}"
+        );
+        let introspection = output
+            .split("fn error_params")
+            .nth(1)
+            .unwrap()
+            .split("fn error_message")
+            .next()
+            .unwrap();
+        assert!(
+            !introspection.contains("unwrap_or_default"),
+            "tuple fields must not become params: {introspection}"
         );
     }
 
     #[test]
-    fn unit_variant_params_are_empty() {
+    fn unit_variant_params_are_an_empty_object() {
         let output = expand_src(&quote! {
             #[derive(Debug, serde::Serialize)]
             pub enum NotFoundError { NothingHere }
         })
         .unwrap();
         assert!(
-            output.contains("Self :: NothingHere => :: std :: vec :: Vec :: new ()"),
-            "{output}"
-        );
-    }
-
-    #[test]
-    fn named_variant_params_serialize_fields() {
-        let output = expand_src(&quote! {
-            #[derive(Debug, serde::Serialize)]
-            pub enum BadRequestError { ParseError { field: String } }
-        })
-        .unwrap();
-        assert!(
             output.contains(
-                "\"field\" , :: locolized_errors :: serde_json :: to_value (field) . unwrap_or_default ()"
+                "Self :: NothingHere => __serializer . serialize_map (Some (0)) ? . end ()"
             ),
             "{output}"
         );
@@ -399,6 +714,31 @@ mod tests {
     }
 
     #[test]
+    fn extended_kinds_resolve() {
+        for (kind, variant) in [
+            ("forbidden", "Forbidden"),
+            ("conflict", "Conflict"),
+            ("unprocessable-entity", "UnprocessableEntity"),
+            ("too-many-requests", "TooManyRequests"),
+            ("service-unavailable", "ServiceUnavailable"),
+        ] {
+            let output = expand_src(&quote! {
+                #[localized(kind = #kind)]
+                pub enum Whatever { Nope }
+            })
+            .unwrap();
+            assert!(
+                output.contains(&format!("ErrorKind :: {variant}")),
+                "kind {kind} in:\n{output}"
+            );
+            assert!(
+                output.contains(&format!("\"errors.{kind}.nope\"")),
+                "kind {kind} key in:\n{output}"
+            );
+        }
+    }
+
+    #[test]
     fn status_attribute_creates_custom_kind() {
         let output = expand_src(&quote! {
             #[localized(status = 418, description = "stout")]
@@ -406,7 +746,7 @@ mod tests {
         })
         .unwrap();
         assert!(output.contains("__status (418"), "{output}");
-        assert!(output.contains("\"stout\""), "{output}");
+        assert!(output.contains("Cow :: Borrowed (\"stout\")"), "{output}");
         assert!(output.contains("\"errors.teapot.brewed\""), "{output}");
     }
 
