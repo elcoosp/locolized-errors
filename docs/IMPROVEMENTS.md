@@ -2,6 +2,12 @@
 
 Status legend: **[x]** implemented in this iteration · **[ ]** deliberately deferred (with reason).
 
+> **0.3.0 iteration** — the second pass over this list (runtime performance,
+> streaming payloads, dependency diet) is tracked at the bottom, in
+> "8. Performance iteration (0.3.0)". Findings and design notes:
+> [PERFORMANCE.md](PERFORMANCE.md); measured results:
+> [BENCHMARKS.md](BENCHMARKS.md).
+
 ## 1. Correctness & robustness
 
 - **[x] Panic-free macro.** The derive used `panic!` for unknown error kinds and
@@ -136,3 +142,44 @@ Status legend: **[x]** implemented in this iteration · **[ ]** deliberately def
 - **[x] `LICENSE`** file (crate declared MIT without shipping one).
 - **[x] Honest, doctest-verified README** with the real interpolation syntax,
   MSRV and attribute reference.
+
+## 8. Performance iteration (0.3.0)
+
+- **[x] Single-pass JSON payloads.** `to_json` / `to_json_string` /
+  `to_json_bytes` now serialize straight from the variant fields through a
+  generated `Serialize` payload struct (`__Payload` + `__Params`), replacing
+  the `Value`-tree build + `to_string` re-walk. Measured: `to_json_string`
+  3.2× faster, `into_response` −34 %.
+- **[x] `application/json` for the generated `IntoResponse`.** 0.2.0 returned
+  `(status, String)`, and axum serves `String` bodies as `text/plain` — the
+  JSON payload was mislabeled. Now built via `__response_from_json` with
+  `Body::from(Vec<u8>)` (zero re-copy) and the explicit header.
+- **[x] Zero-allocation `ErrorKind` for custom statuses.**
+  `Custom(StatusCode, Cow<'static, str>)`; the derive emits
+  `Cow::Borrowed("...")`. `error_kind()` dropped from 11.5 ns (allocating) to
+  0.81 ns.
+- **[x] `error_message()` trait method** — the canonical localized message as
+  `Cow<'static, str>`; `Display`, payloads and `to_loco_error` all share it,
+  so borrowed translations never force a `String`.
+- **[x] Eager fallback allocations removed** from `bad_request_envelope`
+  (`unwrap_or` → `unwrap_or_else`).
+- **[x] Dependency diet.** `loco-rs` without `with-db` (the crate only uses
+  non-gated modules — verified in loco-rs 1.2 sources), `syn` without
+  `full`/`extra-traits`, `serde` without `derive` in the runtime crate.
+  402 → 344 packages, clean build 137 s → 110 s.
+- **[x] Five more named kinds** (`forbidden`, `conflict`,
+  `unprocessable-entity`, `too-many-requests`, `service-unavailable`) —
+  semantic JSON `kind` values and `errors.<kind>.*` key prefixes instead of
+  the opaque `custom`.
+- **[x] Criterion benchmark suite** (`benches/perf.rs`) running the 0.2.0
+  implementations verbatim against the current API on identical inputs.
+- **[x] Codegen hygiene**: all generated items live inside a
+  `const _: () = { … }` block, so the two helper structs are scoped per
+  derive and cannot collide across enums in one module.
+- **[x] 100 % line coverage kept** (cargo-llvm-cov, 0 uncovered lcov rows)
+  across the new paths, including the degraded fallbacks for unserializable
+  fields and hand-written implementors.
+- **[ ] Bypassing `rust_i18n::t!` internals** — deferred: 4.2.4 already uses
+  a single-pass state machine and borrowed lookups; calling the
+  `#[doc(hidden)]` backend directly would couple us to private API.
+- **[ ] no_std / embedded** — still out of scope (axum/loco are std-bound).
