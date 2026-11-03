@@ -3,7 +3,7 @@ resolver = "3"
 members = ["locolized-errors", "locolized-errors-macros"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.94"
 license = "MIT"
@@ -14,11 +14,11 @@ keywords = ["loco", "error", "i18n", "localization", "axum"]
 categories = ["rust-patterns", "web-programming", "localization"]
 
 [workspace.dependencies]
-loco-rs = { version = "1.2", default-features = false, features = ["with-db"] }
+loco-rs = { version = "1.2", default-features = false }
 axum = { version = "0.8.9", default-features = false }
-serde = { version = "1.0.229", features = ["derive"] }
+serde = { version = "1.0.229", default-features = false }
 serde_json = "1.0.154"
-syn = { version = "3.0.9", features = ["full", "extra-traits"] }
+syn = { version = "3.0.9" }
 quote = "1.0.47"
 proc-macro2 = "1.0.107"
 rust-i18n = "4.2.4"
