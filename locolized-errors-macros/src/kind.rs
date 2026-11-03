@@ -14,21 +14,35 @@ use syn::Ident;
 use crate::attrs::ContainerAttrs;
 use crate::case::to_kebab_case;
 
-/// The four HTTP error kinds with a fixed mapping to loco's `Error` variants.
+/// The HTTP error kinds with a fixed mapping to loco's `Error` variants.
+///
+/// The first four map onto loco's named `Error` variants; the extended set
+/// (and any custom `status = ...`) maps onto `Error::CustomError` with its
+/// HTTP status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KnownKind {
     BadRequest,
     Unauthorized,
     NotFound,
     InternalServerError,
+    Forbidden,
+    Conflict,
+    UnprocessableEntity,
+    TooManyRequests,
+    ServiceUnavailable,
 }
 
 /// All kebab-case names accepted by `#[localized(kind = "...")]`, in the order
 /// they are listed in diagnostics.
-pub(crate) const KNOWN_KIND_KEYS: [&str; 4] = [
+pub(crate) const KNOWN_KIND_KEYS: [&str; 9] = [
     "bad-request",
     "unauthorized",
     "not-found",
+    "forbidden",
+    "conflict",
+    "unprocessable-entity",
+    "too-many-requests",
+    "service-unavailable",
     "internal-server-error",
 ];
 
@@ -40,6 +54,11 @@ impl KnownKind {
             "bad-request" => Some(Self::BadRequest),
             "unauthorized" => Some(Self::Unauthorized),
             "not-found" => Some(Self::NotFound),
+            "forbidden" => Some(Self::Forbidden),
+            "conflict" => Some(Self::Conflict),
+            "unprocessable-entity" => Some(Self::UnprocessableEntity),
+            "too-many-requests" => Some(Self::TooManyRequests),
+            "service-unavailable" => Some(Self::ServiceUnavailable),
             "internal-server-error" => Some(Self::InternalServerError),
             _ => None,
         }
@@ -54,6 +73,11 @@ impl KnownKind {
             Self::Unauthorized => "unauthorized",
             Self::NotFound => "not-found",
             Self::InternalServerError => "internal-server-error",
+            Self::Forbidden => "forbidden",
+            Self::Conflict => "conflict",
+            Self::UnprocessableEntity => "unprocessable-entity",
+            Self::TooManyRequests => "too-many-requests",
+            Self::ServiceUnavailable => "service-unavailable",
         }
     }
 
@@ -65,6 +89,15 @@ impl KnownKind {
             Self::NotFound => quote! { ::locolized_errors::ErrorKind::NotFound },
             Self::InternalServerError => {
                 quote! { ::locolized_errors::ErrorKind::InternalServerError }
+            }
+            Self::Forbidden => quote! { ::locolized_errors::ErrorKind::Forbidden },
+            Self::Conflict => quote! { ::locolized_errors::ErrorKind::Conflict },
+            Self::UnprocessableEntity => {
+                quote! { ::locolized_errors::ErrorKind::UnprocessableEntity }
+            }
+            Self::TooManyRequests => quote! { ::locolized_errors::ErrorKind::TooManyRequests },
+            Self::ServiceUnavailable => {
+                quote! { ::locolized_errors::ErrorKind::ServiceUnavailable }
             }
         }
     }
@@ -138,13 +171,14 @@ pub(crate) fn resolve_kind(
 /// Expression for `ErrorKind::Custom(status, description)`.
 ///
 /// The macro has validated `status` to be in `100..=599`, so the runtime
-/// helper cannot fall back in practice.
+/// helper cannot fall back in practice. The description is emitted as a
+/// borrowed `Cow` literal: constructing the kind never allocates.
 pub(crate) fn custom_kind_expr(status: u16, description: Option<&str>) -> TokenStream {
     let description = description.unwrap_or("");
     quote! {
         ::locolized_errors::ErrorKind::Custom(
             ::locolized_errors::__status(#status),
-            ::std::string::String::from(#description),
+            ::std::borrow::Cow::Borrowed(#description),
         )
     }
 }
@@ -198,6 +232,11 @@ mod tests {
             ("UnauthorizedError", "unauthorized"),
             ("NotFoundError", "not-found"),
             ("InternalServerErrorError", "internal-server-error"),
+            ("ForbiddenError", "forbidden"),
+            ("ConflictError", "conflict"),
+            ("UnprocessableEntityError", "unprocessable-entity"),
+            ("TooManyRequestsError", "too-many-requests"),
+            ("ServiceUnavailableError", "service-unavailable"),
             ("Unauthorized", "unauthorized"),
         ] {
             let plan = resolve_for(name, &quote! {}).unwrap();
@@ -225,6 +264,7 @@ mod tests {
         assert_eq!(plan.key_prefix, "teapot");
         let rendered = plan.kind_expr.to_string();
         assert!(rendered.contains("__status (418"), "{rendered}");
+        assert!(rendered.contains("Cow :: Borrowed"), "{rendered}");
         assert!(rendered.contains("\"stout\""), "{rendered}");
     }
 
