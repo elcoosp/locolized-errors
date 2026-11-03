@@ -12,6 +12,7 @@ use locolized_errors::rust_i18n;
 use locolized_errors::{ErrorKind, LocalizedApiError};
 use serde::Serialize;
 use serde_json::Value;
+use std::borrow::Cow;
 
 rust_i18n::i18n!("locales", fallback = "en");
 
@@ -98,6 +99,32 @@ enum SilentError {
 enum UnserializableError {
     #[localized(key = "invalid-input")]
     Broken { value: AlwaysFails },
+}
+
+/// The extended named kinds added in 0.3.0.
+#[derive(Debug, Clone, Serialize, LocalizedApiError)]
+enum ForbiddenError {
+    TokenExpired,
+}
+
+#[derive(Debug, Clone, Serialize, LocalizedApiError)]
+enum ConflictError {
+    EmailTaken,
+}
+
+#[derive(Debug, Clone, Serialize, LocalizedApiError)]
+enum UnprocessableEntityError {
+    MissingField { field: String },
+}
+
+#[derive(Debug, Clone, Serialize, LocalizedApiError)]
+enum TooManyRequestsError {
+    RateLimited,
+}
+
+#[derive(Debug, Clone, Serialize, LocalizedApiError)]
+enum ServiceUnavailableError {
+    Maintenance,
 }
 
 #[derive(Debug, Clone)]
@@ -189,7 +216,7 @@ fn introspection_methods_work() {
         TeapotError::Brewed.error_kind(),
         ErrorKind::Custom(
             locolized_errors::__status(418),
-            "short and stout".to_owned()
+            Cow::Borrowed("short and stout")
         )
     );
     assert_eq!(MixedStatus::Insufficient.status_code(), 507);
@@ -288,6 +315,141 @@ fn loco_conversion_maps_custom_kind_with_description() {
         }
         _ => panic!("expected CustomError"),
     }
+}
+
+#[test]
+fn extended_kinds_resolve_from_enum_names() {
+    english();
+    assert_eq!(
+        ForbiddenError::TokenExpired.error_kind(),
+        ErrorKind::Forbidden
+    );
+    assert_eq!(ForbiddenError::TokenExpired.status_code(), 403);
+    assert_eq!(
+        ForbiddenError::TokenExpired.error_key(),
+        "errors.forbidden.token-expired"
+    );
+
+    assert_eq!(ConflictError::EmailTaken.error_kind(), ErrorKind::Conflict);
+    assert_eq!(ConflictError::EmailTaken.status_code(), 409);
+    assert_eq!(
+        ConflictError::EmailTaken.error_key(),
+        "errors.conflict.email-taken"
+    );
+
+    assert_eq!(
+        UnprocessableEntityError::MissingField {
+            field: "a".to_owned()
+        }
+        .error_kind(),
+        ErrorKind::UnprocessableEntity
+    );
+    assert_eq!(
+        UnprocessableEntityError::MissingField {
+            field: "a".to_owned()
+        }
+        .status_code(),
+        422
+    );
+    assert_eq!(
+        UnprocessableEntityError::MissingField {
+            field: "a".to_owned()
+        }
+        .error_key(),
+        "errors.unprocessable-entity.missing-field"
+    );
+
+    assert_eq!(
+        TooManyRequestsError::RateLimited.error_kind(),
+        ErrorKind::TooManyRequests
+    );
+    assert_eq!(TooManyRequestsError::RateLimited.status_code(), 429);
+    assert_eq!(
+        TooManyRequestsError::RateLimited.error_key(),
+        "errors.too-many-requests.rate-limited"
+    );
+
+    assert_eq!(
+        ServiceUnavailableError::Maintenance.error_kind(),
+        ErrorKind::ServiceUnavailable
+    );
+    assert_eq!(ServiceUnavailableError::Maintenance.status_code(), 503);
+    assert_eq!(
+        ServiceUnavailableError::Maintenance.error_key(),
+        "errors.service-unavailable.maintenance"
+    );
+}
+
+#[test]
+fn extended_kinds_render_and_convert_to_loco() {
+    english();
+    assert_eq!(ForbiddenError::TokenExpired.to_string(), "Token expired");
+    assert_eq!(ConflictError::EmailTaken.to_string(), "Email already taken");
+    assert_eq!(
+        UnprocessableEntityError::MissingField {
+            field: "email".to_owned()
+        }
+        .to_string(),
+        "Missing field 'email'"
+    );
+    assert_eq!(
+        TooManyRequestsError::RateLimited.to_string(),
+        "Rate limited"
+    );
+    assert_eq!(
+        ServiceUnavailableError::Maintenance.to_string(),
+        "Down for maintenance"
+    );
+
+    for (error, status) in [
+        (
+            ForbiddenError::TokenExpired.to_loco_error(),
+            locolized_errors::__status(403),
+        ),
+        (
+            ConflictError::EmailTaken.to_loco_error(),
+            locolized_errors::__status(409),
+        ),
+        (
+            TooManyRequestsError::RateLimited.to_loco_error(),
+            locolized_errors::__status(429),
+        ),
+        (
+            ServiceUnavailableError::Maintenance.to_loco_error(),
+            locolized_errors::__status(503),
+        ),
+    ] {
+        match error {
+            Error::CustomError(got, _) => assert_eq!(got, status),
+            other => panic!("expected CustomError, got {other:?}"),
+        }
+    }
+
+    // The JSON kind is semantic, not the opaque "custom".
+    let payload: Value =
+        serde_json::from_str(&ForbiddenError::TokenExpired.to_json_string()).unwrap_or_default();
+    assert_eq!(payload["kind"], "forbidden");
+}
+
+#[test]
+fn extended_kinds_are_accepted_by_the_kind_attribute() {
+    english();
+    assert_eq!(
+        KindAttrProbe::V.error_kind(),
+        ErrorKind::UnprocessableEntity
+    );
+    assert_eq!(KindAttrProbe::V.status_code(), 422);
+    assert_eq!(
+        KindAttrProbe::V.error_key(),
+        "errors.unprocessable-entity.probe"
+    );
+}
+
+#[derive(Debug, Clone, Serialize, LocalizedApiError)]
+#[localized(kind = "unprocessable-entity")]
+enum KindAttrProbe {
+    #[localized(key = "probe")]
+    V,
 }
 
 #[test]
